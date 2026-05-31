@@ -16,12 +16,12 @@ from typing import Any, cast
 
 from .models import (
     Account,
+    Currency,
     GroupBy,
     JsonDict,
     Kind,
     QueryKind,
     QueryResult,
-    Summary,
     Transaction,
 )
 from .schema import (
@@ -32,6 +32,10 @@ from .schema import (
     CATEGORY_TABLE_CANDIDATES,
     CATFK_COLS,
     CATNAME_COLS,
+    CURRENCY_ISO_COLS,
+    CURRENCY_MAIN_COLS,
+    CURRENCY_SYMBOL_COLS,
+    CURRENCY_TABLE_CANDIDATES,
     DATE_COLS,
     DEFAULT_TYPE_MAP,
     MEMO_COLS,
@@ -248,13 +252,14 @@ class _ResolvedSchema:
     memo: str | None
     category_table: str | None
     asset_table: str | None
+    currency_table: str | None
 
 
 class MoneyManagerBackup:
     """A parsed, offline Realbyte Money Manager backup.
 
-    Income rows are preserved and exposed. Expense-oriented summaries should treat
-    income as informational because app exports can vary by installation.
+    Income rows are preserved and exposed. The backup's currencies are read from
+    the ``CURRENCY`` table when present; ``currency()`` returns the main currency.
     """
 
     def __init__(
@@ -311,6 +316,7 @@ class MoneyManagerBackup:
             memo=_first_present(MEMO_COLS, cols),
             category_table=_pick_table(self._con, CATEGORY_TABLE_CANDIDATES, tables),
             asset_table=_pick_table(self._con, ASSET_TABLE_CANDIDATES, tables),
+            currency_table=_pick_table(self._con, CURRENCY_TABLE_CANDIDATES, tables),
         )
 
     def _iter_rows(self) -> Iterator[sqlite3.Row]:
@@ -366,6 +372,42 @@ class MoneyManagerBackup:
             )
         ]
 
+    def currencies(self) -> list[Currency]:
+        table = self._schema.currency_table
+        if not table:
+            return []
+        cols = _table_columns(self._con, table)
+        iso_col = _first_present(CURRENCY_ISO_COLS, cols)
+        symbol_col = _first_present(CURRENCY_SYMBOL_COLS, cols)
+        if not iso_col and not symbol_col:
+            return []
+        name_col = _first_present(NAME_COLS, cols)
+        main_col = _first_present(CURRENCY_MAIN_COLS, cols)
+        select = [
+            f'"{iso_col}" AS iso' if iso_col else "'' AS iso",
+            f'"{symbol_col}" AS sym' if symbol_col else "'' AS sym",
+            f'"{name_col}" AS nm' if name_col else "'' AS nm",
+            f'"{main_col}" AS mn' if main_col else "0 AS mn",
+        ]
+        return [
+            Currency(
+                iso=str(row["iso"] or ""),
+                symbol=str(row["sym"] or ""),
+                name=str(row["nm"] or ""),
+                is_main=bool(_to_float(row["mn"])),
+            )
+            for row in self._con.execute(f'SELECT {", ".join(select)} FROM "{table}"')
+        ]
+
+    def currency(self) -> Currency | None:
+        items = self.currencies()
+        if not items:
+            return None
+        for item in items:
+            if item.is_main:
+                return item
+        return items[0]
+
     def schema(self) -> JsonDict:
         tables = _list_tables(self._con)
         out: JsonDict = {"tables": {table: _table_columns(self._con, table) for table in tables}}
@@ -394,178 +436,6 @@ class MoneyManagerBackup:
                 for row in rows
             ]
         return out
-
-    def summary(self) -> Summary:
-        today = date.today()
-        cur_month = _month_label(today)
-        prev_month_day = today.replace(day=1) - timedelta(days=1)
-        prev_month = _month_label(prev_month_day)
-        week_start = _iso_week_start(today)
-        prev_week_start = week_start - timedelta(days=7)
-        month_exp = month_inc = pm_exp = pm_inc = today_exp = 0.0
-        week_exp = week_inc = pw_exp = pw_inc = 0.0
-        monthly: dict[str, list[float]] = {}
-        weekly: dict[str, float] = {}
-        cats_month: dict[str, float] = {}
-        daily_month: dict[str, float] = {}
-        top_exp: list[tuple[float, str, str, str]] = []
-        n_txn = 0
-        for txn in self.transactions():
-            if txn.kind == "transfer":
-                continue
-            n_txn += 1
-            label = _month_label(txn.date)
-            bucket = monthly.setdefault(label, [0.0, 0.0])
-            if txn.kind == "expense":
-                bucket[0] += txn.amount
-                weekly[_iso_week_start(txn.date).isoformat()] = (
-                    weekly.get(_iso_week_start(txn.date).isoformat(), 0.0) + txn.amount
-                )
-            else:
-                bucket[1] += txn.amount
-            if label == cur_month:
-                if txn.kind == "expense":
-                    month_exp += txn.amount
-                    cats_month[txn.category] = cats_month.get(txn.category, 0.0) + txn.amount
-                    top_exp.append(
-                        (txn.amount, txn.memo or txn.category, txn.category, txn.date.isoformat())
-                    )
-                    daily_month[txn.date.isoformat()] = (
-                        daily_month.get(txn.date.isoformat(), 0.0) + txn.amount
-                    )
-                    if txn.date == today:
-                        today_exp += txn.amount
-                else:
-                    month_inc += txn.amount
-            elif label == prev_month:
-                if txn.kind == "expense":
-                    pm_exp += txn.amount
-                else:
-                    pm_inc += txn.amount
-            if txn.date >= week_start:
-                if txn.kind == "expense":
-                    week_exp += txn.amount
-                else:
-                    week_inc += txn.amount
-            elif txn.date >= prev_week_start:
-                if txn.kind == "expense":
-                    pw_exp += txn.amount
-                else:
-                    pw_inc += txn.amount
-        anchor = today.replace(day=1)
-        months: list[str] = []
-        for i in range(11, -1, -1):
-            year = anchor.year
-            month = anchor.month - i
-            while month <= 0:
-                month += 12
-                year -= 1
-            months.append(f"{year:04d}-{month:02d}")
-        series: list[JsonDict] = []
-        for label in months:
-            exp, inc = monthly.get(label, [0.0, 0.0])
-            series.append({"label": label, "expense": round(exp), "income": round(inc)})
-        wk_series = [
-            round(weekly.get((week_start - timedelta(days=7 * i)).isoformat(), 0.0))
-            for i in range(7, -1, -1)
-        ]
-        cats_sorted = sorted(cats_month.items(), key=lambda item: item[1], reverse=True)
-        top_exp.sort(reverse=True)
-        days_in_month = calendar.monthrange(today.year, today.month)[1]
-        day_of_month = today.day
-        daily_series = [
-            {
-                "date": date(today.year, today.month, day).isoformat(),
-                "amount": round(
-                    daily_month.get(date(today.year, today.month, day).isoformat(), 0.0)
-                ),
-            }
-            for day in range(1, day_of_month + 1)
-        ]
-        avg_daily = month_exp / day_of_month if day_of_month else 0.0
-        projected = avg_daily * days_in_month
-        complete = [item for item in series if item["label"] != cur_month]
-        last3 = [int(item["expense"]) for item in complete[-3:]]
-        trailing_avg = sum(last3) / len(last3) if last3 else 0.0
-        mom_pct = ((projected - pm_exp) / pm_exp * 100.0) if pm_exp else None
-        wow_pct = ((week_exp - pw_exp) / pw_exp * 100.0) if pw_exp else None
-        top_cat = cats_sorted[0] if cats_sorted else None
-        top_cat_share = (top_cat[1] / month_exp * 100.0) if top_cat and month_exp else 0.0
-
-        def money(value: float) -> str:
-            return f"₹{int(round(value)):,}"
-
-        insights: list[str] = []
-        if month_exp:
-            insights.append(
-                f"Spent {money(month_exp)} so far this month over {day_of_month} day{'s' if day_of_month != 1 else ''} (~{money(avg_daily)}/day)."
-            )
-            if mom_pct is not None:
-                insights.append(
-                    f"On pace for ~{money(projected)} by month-end — {'up' if mom_pct >= 0 else 'down'} {abs(mom_pct):.0f}% vs last month ({money(pm_exp)})."
-                )
-            elif trailing_avg:
-                insights.append(f"On pace for ~{money(projected)} by month-end.")
-            if trailing_avg:
-                vs = (projected - trailing_avg) / trailing_avg * 100.0
-                insights.append(
-                    f"Projection is {abs(vs):.0f}% {'above' if vs >= 0 else 'below'} your 3-month average of {money(trailing_avg)}."
-                )
-            if top_cat:
-                insights.append(
-                    f"Biggest category: {top_cat[0]} {money(top_cat[1])} ({top_cat_share:.0f}% of spend)."
-                )
-            if top_exp:
-                amount, memo, category, _day = top_exp[0]
-                tail = f" ({memo})" if memo and memo != category else ""
-                insights.append(f"Largest single expense: {money(amount)} on {category}{tail}.")
-            if wow_pct is not None:
-                insights.append(
-                    f"This week {money(week_exp)} — {'up' if wow_pct >= 0 else 'down'} {abs(wow_pct):.0f}% vs last week ({money(pw_exp)})."
-                )
-        data: JsonDict = {
-            "status": "ok",
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "month": {
-                "label": cur_month,
-                "expense": round(month_exp),
-                "income": round(month_inc),
-                "net": round(month_inc - month_exp),
-            },
-            "prev_month": {"label": prev_month, "expense": round(pm_exp), "income": round(pm_inc)},
-            "today_expense": round(today_exp),
-            "week": {"expense": round(week_exp), "income": round(week_inc)},
-            "prev_week": {"expense": round(pw_exp), "income": round(pw_inc)},
-            "monthly_series": series,
-            "weekly_series": ",".join(str(value) for value in wk_series),
-            "daily_series": daily_series,
-            "categories_month": [
-                {"name": name, "amount": round(amount)} for name, amount in cats_sorted[:12]
-            ],
-            "top_expenses_month": [
-                {"amount": round(amount), "memo": memo[:40], "category": category, "date": day}
-                for amount, memo, category, day in top_exp[:5]
-            ],
-            "stats": {
-                "days_in_month": days_in_month,
-                "day_of_month": day_of_month,
-                "avg_daily": round(avg_daily),
-                "projected_month": round(projected),
-                "trailing_avg": round(trailing_avg),
-                "mom_pct": round(mom_pct) if mom_pct is not None else None,
-                "wow_pct": round(wow_pct) if wow_pct is not None else None,
-                "top_category": top_cat[0] if top_cat else None,
-                "top_category_amount": round(top_cat[1]) if top_cat else 0,
-                "top_category_share": round(top_cat_share),
-            },
-            "insights": insights,
-            "accounts": [
-                {"name": account.name, "balance": round(account.balance)}
-                for account in self.accounts()[:12]
-            ],
-            "counts": {"transactions": n_txn},
-        }
-        return Summary(data)
 
     def query(
         self,
@@ -687,10 +557,3 @@ class MoneyManagerBackup:
                 ]
             )
         return result
-
-
-def parse_mmbak(
-    path: os.PathLike[str] | str, type_map: Mapping[int, str] | None = None
-) -> JsonDict:
-    with MoneyManagerBackup.from_file(path, type_map=type_map) as backup:
-        return backup.summary().as_dict()

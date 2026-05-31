@@ -16,7 +16,6 @@ from moneymanager_parser.core import (
     _month_label,
     _parse_date,
     _to_float,
-    parse_mmbak,
 )
 
 
@@ -90,34 +89,70 @@ def test_query_filters_groups_and_lists(sample_mmbak: Path) -> None:
             backup.query(kind="bad")  # type: ignore[arg-type]
 
 
-def test_summary_schema_and_helpers(sample_mmbak: Path) -> None:
+def test_schema_and_helpers(sample_mmbak: Path) -> None:
     with MoneyManagerBackup.from_file(sample_mmbak) as backup:
-        summary = backup.summary().as_dict()
-        assert summary["status"] == "ok"
-        assert summary["month"]["expense"] == 200
-        assert summary["week"]["expense"] >= 0
-        assert summary["categories_month"]
-        assert summary["top_expenses_month"]
-        assert summary["accounts"]
-        assert summary["counts"]["transactions"] == 6
-        assert isinstance(summary["weekly_series"], str)
         schema = backup.schema()
         assert schema["transaction_table"] == "INOUTCOME"
         assert schema["resolved_columns"]["amount"] == "ZMONEY"
         assert schema["do_type_breakdown"]
-    assert parse_mmbak(sample_mmbak)["status"] == "ok"
     assert _month_label(date(2026, 2, 3)) == "2026-02"
     assert _iso_week_start(date(2026, 2, 4)).weekday() == 0
 
 
+def test_currency_reading(sample_mmbak: Path) -> None:
+    with MoneyManagerBackup.from_file(sample_mmbak) as backup:
+        currencies = backup.currencies()
+        assert {c.iso for c in currencies} == {"INR", "USD"}
+        main = backup.currency()
+        assert main is not None
+        assert main.iso == "USD"
+        assert main.symbol == "$"
+        assert main.is_main is True
+
+
+def test_currency_absent_returns_none(tmp_path: Path) -> None:
+    db = tmp_path / "nocur.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE INOUTCOME (ZMONEY TEXT, WDATE TEXT, DO_TYPE TEXT)")
+    con.execute("INSERT INTO INOUTCOME VALUES ('10', '2026-01-01', '1')")
+    con.commit()
+    con.close()
+    with MoneyManagerBackup.from_file(db) as backup:
+        assert backup.currencies() == []
+        assert backup.currency() is None
+
+
+def test_currency_falls_back_to_first_when_no_main(tmp_path: Path) -> None:
+    db = tmp_path / "altcur.sqlite"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE INOUTCOME (amount TEXT, date TEXT, type TEXT);
+        CREATE TABLE currency (id TEXT, code TEXT, symbol TEXT, name TEXT);
+        """
+    )
+    con.execute("INSERT INTO INOUTCOME VALUES ('10', '2026-01-01', '1')")
+    con.execute("INSERT INTO currency VALUES ('1', 'EUR', '€', 'Euro')")
+    con.commit()
+    con.close()
+    with MoneyManagerBackup.from_file(db) as backup:
+        main = backup.currency()
+        assert main is not None
+        assert main.iso == "EUR"
+        assert main.symbol == "€"
+        assert main.is_main is False
+
+
 def test_cli_smoke(sample_mmbak: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["summary", str(sample_mmbak)]) == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "ok"
     assert main(["schema", str(sample_mmbak)]) == 0
     assert json.loads(capsys.readouterr().out)["transaction_table"] == "INOUTCOME"
+    assert main(["currency", str(sample_mmbak)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["main"]["iso"] == "USD"
+    assert len(payload["all"]) == 2
     assert main(["query", str(sample_mmbak), "--top", "1"]) == 0
     assert json.loads(capsys.readouterr().out)["top"]
-    assert main(["summary", str(sample_mmbak.with_name("missing.mmbak"))]) == 1
+    assert main(["schema", str(sample_mmbak.with_name("missing.mmbak"))]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "error"
 
 
@@ -181,7 +216,7 @@ def test_private_temp_connection_fallback(tmp_path: Path) -> None:
     assert not temp_name.exists()
 
 
-def test_more_date_and_summary_branches(tmp_path: Path) -> None:
+def test_more_date_and_query_branches(tmp_path: Path) -> None:
     assert _parse_date(123) is None
     assert _parse_date("2026-99-99") is None
     db = tmp_path / "future.sqlite"
@@ -191,6 +226,5 @@ def test_more_date_and_summary_branches(tmp_path: Path) -> None:
     con.commit()
     con.close()
     with MoneyManagerBackup.from_file(db) as backup:
-        summary = backup.summary().as_dict()
-        assert summary["month"]["expense"] == 0
+        assert backup.query(month="2999-01").as_dict()["summary"]["total"] == 10
         assert backup.query(search="none").as_dict()["summary"]["total"] == 0

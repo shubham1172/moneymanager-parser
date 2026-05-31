@@ -8,16 +8,28 @@ from collections.abc import Sequence
 from typing import Any
 
 from .core import MoneyManagerBackup
+from .models import Currency
 
 
 def _print(data: Any) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+def _currency_dict(currency: Currency | None) -> dict[str, Any] | None:
+    if currency is None:
+        return None
+    return {
+        "iso": currency.iso,
+        "symbol": currency.symbol,
+        "name": currency.name,
+        "is_main": currency.is_main,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mmbak", description="Offline Realbyte .mmbak parser")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("summary", "schema"):
+    for name in ("schema", "currency"):
         cmd = sub.add_parser(name)
         cmd.add_argument("path")
     query = sub.add_parser("query")
@@ -39,10 +51,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         with MoneyManagerBackup.from_file(args.path) as backup:
-            if args.command == "summary":
-                _print(backup.summary().as_dict())
-            elif args.command == "schema":
+            if args.command == "schema":
                 _print(backup.schema())
+            elif args.command == "currency":
+                main_currency = backup.currency()
+                _print(
+                    {
+                        "main": _currency_dict(main_currency),
+                        "all": [_currency_dict(item) for item in backup.currencies()],
+                    }
+                )
             else:
                 _print(
                     backup.query(

@@ -34,6 +34,7 @@ def sample_mmbak(tmp_path: Path) -> Path:
         """
         CREATE TABLE ZCATEGORY (uid TEXT, C_UID TEXT, ZNAME TEXT);
         CREATE TABLE ASSETS (uid TEXT, ZNAME TEXT, ZMONEY TEXT);
+        CREATE TABLE CURRENCY (uid TEXT, ISO TEXT, SYMBOL TEXT, NAME TEXT, IS_MAIN_CURRENCY INTEGER);
         CREATE TABLE INOUTCOME (
             ZMONEY TEXT, WDATE TEXT, ZDATE TEXT, DO_TYPE TEXT,
             ctgUid TEXT, CATEGORY_NAME TEXT, assetUid TEXT, ZCONTENT TEXT
@@ -46,6 +47,10 @@ def sample_mmbak(tmp_path: Path) -> Path:
     )
     con.executemany(
         "INSERT INTO ASSETS VALUES (?, ?, ?)", [("a1", "Cash", "1000"), ("a2", "Bank", "2500")]
+    )
+    con.executemany(
+        "INSERT INTO CURRENCY VALUES (?, ?, ?, ?, ?)",
+        [("cur1", "INR", "₹", "INR - India", 0), ("cur2", "USD", "$", "USD - US Dollar", 1)],
     )
     today = date.today()
     rows = [

@@ -7,9 +7,13 @@ Typed Python SDK and offline CLI for Realbyte Money Manager `.mmbak` exports.
 
 A `.mmbak` export is a ZIP-wrapped SQLite database. This package reads the export locally,
 resolves common schema aliases across app versions, and exposes transactions, summaries, flexible
-queries, schema inspection, categories, and accounts. Core parsing uses only the Python standard
-library. Income is exposed by the API, but expense summaries should treat it as informational because
-Money Manager exports can vary by installation.
+queries, schema inspection, categories, accounts, and currencies. Core parsing uses only the Python
+standard library. Income is exposed by the API, but expense-oriented analysis should treat it as
+informational because Money Manager exports can vary by installation.
+
+The backup's currencies are read from the `CURRENCY` table when present. `currency()` returns the main
+currency (`ISO`, `symbol`, `name`); amounts are stored in the account/transaction currency and are not
+converted.
 
 ## Install
 
@@ -25,7 +29,9 @@ pip install moneymanager-parser
 from moneymanager_parser import MoneyManagerBackup
 
 with MoneyManagerBackup.from_file("backup.mmbak") as backup:
-    print(backup.summary().as_dict()["month"])
+    main = backup.currency()
+    if main:
+        print(main.iso, main.symbol)
     for txn in backup.transactions():
         print(txn.date, txn.kind, txn.category, txn.amount)
     print(backup.query(month="2026-01", group_by="category").as_dict())
@@ -40,9 +46,9 @@ MoneyManagerBackup.from_file("backup.mmbak", type_map={0: "income", 1: "expense"
 ## CLI
 
 ```bash
-mmbak summary backup.mmbak
 mmbak query backup.mmbak --month 2026-01 --group-by category --top 10
 mmbak schema backup.mmbak
+mmbak currency backup.mmbak
 ```
 
 All commands print JSON and never contact external services.

@@ -31,11 +31,11 @@ class Account:
 
 
 @dataclass(frozen=True, slots=True)
-class Summary:
-    data: JsonDict
-
-    def as_dict(self) -> JsonDict:
-        return dict(self.data)
+class Currency:
+    iso: str
+    symbol: str
+    name: str = ""
+    is_main: bool = False
 
 
 @dataclass(frozen=True, slots=True)
