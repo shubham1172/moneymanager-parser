@@ -1,7 +1,8 @@
 # moneymanager-parser
 
 [![CI](https://github.com/shubham1172/moneymanager-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/shubham1172/moneymanager-parser/actions/workflows/ci.yml)
-![PyPI](https://img.shields.io/badge/PyPI-unpublished-lightgrey)
+[![PyPI](https://img.shields.io/pypi/v/moneymanager-parser)](https://pypi.org/project/moneymanager-parser/)
+[![Python versions](https://img.shields.io/pypi/pyversions/moneymanager-parser)](https://pypi.org/project/moneymanager-parser/)
 
 Typed Python SDK and offline CLI for Realbyte Money Manager `.mmbak` exports.
 
@@ -16,8 +17,6 @@ currency (`ISO`, `symbol`, `name`); amounts are stored in the account/transactio
 converted.
 
 ## Install
-
-After the first release:
 
 ```bash
 pip install moneymanager-parser
