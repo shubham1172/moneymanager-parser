@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import calendar
+import io
 import os
 import sqlite3
+import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -142,19 +144,44 @@ def _iso_week_start(day: date) -> date:
     return day - timedelta(days=day.weekday())
 
 
-def _connection_from_bytes(data: bytes) -> sqlite3.Connection:
-    con = sqlite3.connect(":memory:")
+class _ManagedConnection(sqlite3.Connection):
+    _cleanup_path: Path | None = None
+
+    def close(self) -> None:
+        cleanup = self._cleanup_path
+        try:
+            super().close()
+        finally:
+            if cleanup is not None:
+                cleanup.unlink(missing_ok=True)
+
+
+def _connect_file(path: Path, *, readonly: bool, cleanup: Path | None = None) -> sqlite3.Connection:
+    uri = f"file:{path.resolve()}?mode=ro" if readonly else str(path)
+    con = sqlite3.connect(uri, uri=readonly, factory=_ManagedConnection)
     con.row_factory = sqlite3.Row
-    if not hasattr(con, "deserialize"):
-        con.close()
-        raise RuntimeError("sqlite deserialize support is required for in-memory backups")
-    con.deserialize(data)
+    con._cleanup_path = cleanup
     return con
 
 
-def _read_db_bytes_from_zip(data: bytes, label: str = "backup") -> bytes:
-    import io
+def _temp_connection_from_bytes(data: bytes, directory: Path | None = None) -> sqlite3.Connection:
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", dir=directory, delete=False) as handle:
+        handle.write(data)
+        name = Path(handle.name)
+    return _connect_file(name, readonly=True, cleanup=name)
 
+
+def _connection_from_bytes(data: bytes, directory: Path | None = None) -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    if hasattr(con, "deserialize"):
+        con.deserialize(data)
+        return con
+    con.close()
+    return _temp_connection_from_bytes(data, directory)
+
+
+def _read_db_bytes_from_zip(data: bytes, label: str = "backup") -> bytes:
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         members = [name for name in archive.namelist() if not name.endswith("/")]
         if not members:
@@ -172,11 +199,10 @@ def _open_mmbak(path: os.PathLike[str] | str) -> sqlite3.Connection:
     file_path = Path(path)
     data = file_path.read_bytes()
     if zipfile.is_zipfile(file_path):
-        return _connection_from_bytes(_read_db_bytes_from_zip(data, str(file_path)))
-    uri = f"file:{file_path.resolve()}?mode=ro"
-    con = sqlite3.connect(uri, uri=True)
-    con.row_factory = sqlite3.Row
-    return con
+        return _connection_from_bytes(
+            _read_db_bytes_from_zip(data, str(file_path)), file_path.parent
+        )
+    return _connect_file(file_path, readonly=True)
 
 
 def _name_map(con: sqlite3.Connection, table: str | None) -> dict[str, str]:
@@ -251,9 +277,7 @@ class MoneyManagerBackup:
         cls, data: bytes, *, type_map: Mapping[int, str] | None = None
     ) -> MoneyManagerBackup:
         payload = (
-            _read_db_bytes_from_zip(data, "bytes")
-            if zipfile.is_zipfile(__import__("io").BytesIO(data))
-            else data
+            _read_db_bytes_from_zip(data, "bytes") if zipfile.is_zipfile(io.BytesIO(data)) else data
         )
         return cls(_connection_from_bytes(payload), type_map=type_map)
 

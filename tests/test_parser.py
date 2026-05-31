@@ -161,3 +161,36 @@ def test_raw_from_bytes_and_missing_optional_tables(tmp_path: Path) -> None:
         assert backup.accounts() == []
         assert backup.categories() == ["Uncategorized"]
         assert "do_type_breakdown" in backup.schema()
+
+
+def test_private_temp_connection_fallback(tmp_path: Path) -> None:
+    from moneymanager_parser.core import _temp_connection_from_bytes
+
+    db = tmp_path / "fallback.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE demo (value TEXT)")
+    con.execute("INSERT INTO demo VALUES ('ok')")
+    con.commit()
+    con.close()
+    backup = _temp_connection_from_bytes(db.read_bytes(), tmp_path)
+    rows = backup.execute("SELECT value FROM demo").fetchall()
+    temp_name = Path(backup.execute("PRAGMA database_list").fetchone()[2])
+    assert rows[0][0] == "ok"
+    assert temp_name.exists()
+    backup.close()
+    assert not temp_name.exists()
+
+
+def test_more_date_and_summary_branches(tmp_path: Path) -> None:
+    assert _parse_date(123) is None
+    assert _parse_date("2026-99-99") is None
+    db = tmp_path / "future.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE INOUTCOME (ZMONEY TEXT, WDATE TEXT, DO_TYPE TEXT, ZCONTENT TEXT)")
+    con.execute("INSERT INTO INOUTCOME VALUES ('10', '2999-01-01', '1', 'future')")
+    con.commit()
+    con.close()
+    with MoneyManagerBackup.from_file(db) as backup:
+        summary = backup.summary().as_dict()
+        assert summary["month"]["expense"] == 0
+        assert backup.query(search="none").as_dict()["summary"]["total"] == 0
