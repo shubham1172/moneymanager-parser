@@ -11,6 +11,8 @@ import pytest
 from moneymanager_parser import MoneyManagerBackup
 from moneymanager_parser.cli import main
 from moneymanager_parser.core import (
+    _from_epoch,
+    _is_deleted,
     _iso_week_start,
     _kind,
     _month_label,
@@ -228,3 +230,63 @@ def test_more_date_and_query_branches(tmp_path: Path) -> None:
     with MoneyManagerBackup.from_file(db) as backup:
         assert backup.query(month="2999-01").as_dict()["summary"]["total"] == 10
         assert backup.query(search="none").as_dict()["summary"]["total"] == 0
+
+
+def test_realistic_schema_names_balances_and_deletes(realistic_mmbak: Path) -> None:
+    with MoneyManagerBackup.from_file(realistic_mmbak) as backup:
+        txns = backup.transactions()
+        assert len(txns) == 3
+        assert {t.account for t in txns} == {"Checking"}
+        transfer = next(t for t in txns if t.kind == "transfer")
+        assert transfer.account == "Checking"
+        assert transfer.to_account == "Savings"
+
+        balances = {a.name: a.balance for a in backup.accounts()}
+        assert balances == {"Checking": 2400.0, "Savings": 500.0}
+
+        assert "GoneCategory" not in backup.categories()
+
+        currencies = backup.currencies()
+        assert {c.iso for c in currencies} == {"USD"}
+        main = backup.currency()
+        assert main is not None and main.iso == "USD"
+
+
+def test_transactions_are_memoized(sample_mmbak: Path) -> None:
+    with MoneyManagerBackup.from_file(sample_mmbak) as backup:
+        first = backup.transactions()
+        second = backup.transactions()
+        assert first == second
+        assert first is not second  # returns a fresh list, not the cache
+
+
+def test_connection_is_read_only(sample_mmbak: Path) -> None:
+    with MoneyManagerBackup.from_file(sample_mmbak) as backup:
+        with pytest.raises(sqlite3.OperationalError):
+            backup._con.execute("CREATE TABLE hack (x TEXT)")
+
+
+def test_is_deleted_variants() -> None:
+    assert _is_deleted(1) is True
+    assert _is_deleted(-1) is True
+    assert _is_deleted("yes") is True
+    assert _is_deleted("true") is True
+    assert _is_deleted(0) is False
+    assert _is_deleted(None) is False
+    assert _is_deleted("") is False
+    assert _is_deleted("no") is False
+    assert _is_deleted("nonsense") is False
+
+
+def test_from_epoch_bounds() -> None:
+    assert _from_epoch(123) is None
+    assert _from_epoch(99999999999999999) is None  # year well past 2100
+    assert _parse_date("99999999999999999") is None
+
+
+def test_zip_bomb_guard(realistic_mmbak: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import moneymanager_parser.core as core
+
+    monkeypatch.setattr(core, "MAX_DB_BYTES", 16)
+    with pytest.raises(ValueError, match="oversized"):
+        MoneyManagerBackup.from_file(realistic_mmbak)

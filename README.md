@@ -7,7 +7,7 @@
 Typed Python SDK and offline CLI for Realbyte Money Manager `.mmbak` exports.
 
 A `.mmbak` export is a ZIP-wrapped SQLite database. This package reads the export locally,
-resolves common schema aliases across app versions, and exposes transactions, summaries, flexible
+resolves common schema aliases across app versions, and exposes transactions, flexible
 queries, schema inspection, categories, accounts, and currencies. Core parsing uses only the Python
 standard library. Income is exposed by the API, but expense-oriented analysis should treat it as
 informational because Money Manager exports can vary by installation.
@@ -15,6 +15,19 @@ informational because Money Manager exports can vary by installation.
 The backup's currencies are read from the `CURRENCY` table when present. `currency()` returns the main
 currency (`ISO`, `symbol`, `name`); amounts are stored in the account/transaction currency and are not
 converted.
+
+Soft-deleted rows (`IS_DEL` / `C_IS_DEL`) are excluded from all results. Account names resolve from
+the asset table (including the `NIC_NAME` nickname used by recent exports). When the asset table has an
+explicit balance column it is used as-is; otherwise `accounts()` reports a best-effort balance derived
+from transactions (income adds, expense subtracts, transfers move the amount to the destination account
+via `toAssetUid`). Derived balances are raw numeric sums with no currency conversion, so totals mixing
+currencies are not meaningful.
+
+### Safety
+
+All connections are opened read-only (`PRAGMA query_only=ON`) and never contact external services.
+Archive members are size-checked before extraction to guard against decompression bombs, and all SQL
+identifiers read from the backup are quoted defensively.
 
 ## Install
 

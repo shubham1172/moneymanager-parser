@@ -95,3 +95,48 @@ def alternate_mmbak(tmp_path: Path) -> Path:
     con.commit()
     con.close()
     return _write_zip(db, tmp_path / "alternate.mmbak")
+
+
+@pytest.fixture()
+def realistic_mmbak(tmp_path: Path) -> Path:
+    """A backup mirroring real .mmbak schema: NIC_NAME assets, no balance column,
+    toAssetUid transfers, and IS_DEL soft-delete flags."""
+    db = tmp_path / "realistic.sqlite"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE ZCATEGORY (uid TEXT, NAME TEXT, C_IS_DEL INTEGER);
+        CREATE TABLE ASSETS (uid TEXT, NIC_NAME TEXT);
+        CREATE TABLE CURRENCY (uid TEXT, ISO TEXT, SYMBOL TEXT, NAME TEXT, IS_MAIN_CURRENCY INTEGER, IS_DEL INTEGER);
+        CREATE TABLE INOUTCOME (
+            ZMONEY TEXT, WDATE TEXT, DO_TYPE TEXT, ctgUid TEXT,
+            assetUid TEXT, toAssetUid TEXT, ZCONTENT TEXT, IS_DEL INTEGER
+        );
+        """
+    )
+    con.executemany(
+        "INSERT INTO ZCATEGORY VALUES (?, ?, ?)",
+        [("1", "Food", 0), ("2", "Salary", 0), ("9", "GoneCategory", 1)],
+    )
+    con.executemany(
+        "INSERT INTO ASSETS VALUES (?, ?)",
+        [("a1", "Checking"), ("a2", "Savings")],
+    )
+    con.executemany(
+        "INSERT INTO CURRENCY VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("c1", "USD", "$", "US Dollar", 1, 0),
+            ("c2", "EUR", "\u20ac", "Euro", 0, 1),
+        ],
+    )
+    today = date.today().isoformat()
+    rows = [
+        ("100", today, "1", "1", "a1", None, "groceries", 0),
+        ("3000", today, "0", "2", "a1", None, "paycheck", 0),
+        ("500", today, "3", None, "a1", "a2", "move to savings", 0),
+        ("77", today, "1", "1", "a1", None, "deleted expense", 1),
+    ]
+    con.executemany("INSERT INTO INOUTCOME VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    return _write_zip(db, tmp_path / "realistic.mmbak")

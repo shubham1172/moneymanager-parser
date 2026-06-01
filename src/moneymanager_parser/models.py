@@ -22,6 +22,7 @@ class Transaction:
     category: str
     memo: str
     account: str | None = None
+    to_account: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

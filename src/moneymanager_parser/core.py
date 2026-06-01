@@ -26,8 +26,10 @@ from .models import (
 )
 from .schema import (
     AMOUNT_COLS,
+    ASSET_NAME_COLS,
     ASSET_TABLE_CANDIDATES,
     ASSETFK_COLS,
+    ASSETTOFK_COLS,
     BALANCE_COLS,
     CATEGORY_TABLE_CANDIDATES,
     CATFK_COLS,
@@ -38,6 +40,7 @@ from .schema import (
     CURRENCY_TABLE_CANDIDATES,
     DATE_COLS,
     DEFAULT_TYPE_MAP,
+    IS_DEL_COLS,
     MEMO_COLS,
     NAME_COLS,
     STRING_TYPE_MAP,
@@ -47,6 +50,34 @@ from .schema import (
 )
 
 TypeMap = Mapping[int, Kind]
+
+# Hard cap on a single SQLite member extracted from a .mmbak ZIP, to guard
+# against decompression bombs in untrusted backups.
+MAX_DB_BYTES = 512 * 1024 * 1024
+
+
+def _q(identifier: str) -> str:
+    """Quote a SQL identifier, escaping embedded double quotes."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _is_deleted(value: object) -> bool:
+    """Interpret a soft-delete flag from heterogeneous backup schemas."""
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"", "0", "false", "f", "no", "n"}:
+        return False
+    if text in {"1", "true", "t", "yes", "y"}:
+        return True
+    try:
+        return float(text) != 0
+    except ValueError:
+        return False
 
 
 def _first_present(options: Iterable[str], available: Iterable[str]) -> str | None:
@@ -63,7 +94,7 @@ def _first_present(options: Iterable[str], available: Iterable[str]) -> str | No
 
 
 def _table_columns(con: sqlite3.Connection, table: str) -> list[str]:
-    return [str(row[1]) for row in con.execute(f'PRAGMA table_info("{table}")')]
+    return [str(row[1]) for row in con.execute(f"PRAGMA table_info({_q(table)})")]
 
 
 def _list_tables(con: sqlite3.Connection) -> list[str]:
@@ -76,36 +107,43 @@ def _pick_table(
     return _first_present(candidates, tables)
 
 
+def _from_epoch(number: float) -> date | None:
+    if number >= 1e12:
+        seconds = number / 1000
+    elif number >= 1e9:
+        seconds = number
+    else:
+        return None
+    try:
+        moment = datetime.fromtimestamp(seconds)
+    except (OverflowError, OSError, ValueError):
+        return None
+    if 1970 <= moment.year <= 2100:
+        return moment.date()
+    return None
+
+
 def _parse_date(value: object) -> date | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        number = float(value)
-        if number > 1e12:
-            return datetime.fromtimestamp(number / 1000).date()
-        if number > 1e9:
-            return datetime.fromtimestamp(number).date()
-        return None
+        return _from_epoch(float(value))
     text = str(value).strip()
     if not text:
         return None
-    if text.lstrip("-").isdigit():
-        number = int(text)
-        if len(text) >= 12:
-            return datetime.fromtimestamp(number / 1000).date()
-        if len(text) in {10, 11}:
-            return datetime.fromtimestamp(number).date()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
         try:
             return datetime.strptime(text, fmt).date()
         except ValueError:
             continue
-    digits = "".join(char for char in text if char.isdigit())
-    if len(digits) >= 8:
-        try:
-            return date(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
-        except ValueError:
-            return None
+    if text.lstrip("-").isdigit():
+        digits = text.lstrip("-")
+        if len(digits) == 8:
+            try:
+                return date(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
+            except ValueError:
+                return None
+        return _from_epoch(float(int(text)))
     return None
 
 
@@ -165,6 +203,8 @@ def _connect_file(path: Path, *, readonly: bool, cleanup: Path | None = None) ->
     con = sqlite3.connect(uri, uri=readonly, factory=_ManagedConnection)
     con.row_factory = sqlite3.Row
     con._cleanup_path = cleanup
+    if readonly:
+        con.execute("PRAGMA query_only=ON")
     return con
 
 
@@ -180,48 +220,64 @@ def _connection_from_bytes(data: bytes, directory: Path | None = None) -> sqlite
     con.row_factory = sqlite3.Row
     if hasattr(con, "deserialize"):
         con.deserialize(data)
+        con.execute("PRAGMA query_only=ON")
         return con
     con.close()
     return _temp_connection_from_bytes(data, directory)
 
 
+def _select_zip_member(archive: zipfile.ZipFile, label: str) -> str:
+    members = [name for name in archive.namelist() if not name.endswith("/")]
+    if not members:
+        raise ValueError(f"empty .mmbak archive: {label}")
+    member = next(
+        (name for name in members if name.lower().endswith((".sqlite", ".db", ".mmbak"))),
+        None,
+    )
+    if member is None:
+        member = max(members, key=lambda name: archive.getinfo(name).file_size)
+    size = archive.getinfo(member).file_size
+    if size > MAX_DB_BYTES:
+        raise ValueError(
+            f"refusing to extract oversized backup member ({size} bytes > {MAX_DB_BYTES})"
+        )
+    return member
+
+
 def _read_db_bytes_from_zip(data: bytes, label: str = "backup") -> bytes:
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        members = [name for name in archive.namelist() if not name.endswith("/")]
-        if not members:
-            raise ValueError(f"empty .mmbak archive: {label}")
-        member = next(
-            (name for name in members if name.lower().endswith((".sqlite", ".db", ".mmbak"))),
-            None,
-        )
-        if member is None:
-            member = max(members, key=lambda name: archive.getinfo(name).file_size)
-        return archive.read(member)
+        return archive.read(_select_zip_member(archive, label))
 
 
 def _open_mmbak(path: os.PathLike[str] | str) -> sqlite3.Connection:
     file_path = Path(path)
-    data = file_path.read_bytes()
     if zipfile.is_zipfile(file_path):
-        return _connection_from_bytes(
-            _read_db_bytes_from_zip(data, str(file_path)), file_path.parent
-        )
+        with zipfile.ZipFile(file_path) as archive:
+            data = archive.read(_select_zip_member(archive, str(file_path)))
+        return _connection_from_bytes(data, file_path.parent)
     return _connect_file(file_path, readonly=True)
 
 
-def _name_map(con: sqlite3.Connection, table: str | None) -> dict[str, str]:
+def _name_map(
+    con: sqlite3.Connection, table: str | None, name_cols: Iterable[str] = NAME_COLS
+) -> dict[str, str]:
     if not table:
         return {}
     cols = _table_columns(con, table)
-    name_col = _first_present(NAME_COLS, cols)
+    name_col = _first_present(name_cols, cols)
     if not name_col:
         return {}
     id_cols = [col for col in UID_COLS if col in cols]
     if not id_cols:
         return {}
-    selected = ", ".join(f'"{col}" AS k{index}' for index, col in enumerate(id_cols))
+    del_col = _first_present(IS_DEL_COLS, cols)
+    selected = ", ".join(f"{_q(col)} AS k{index}" for index, col in enumerate(id_cols))
+    del_select = f", {_q(del_col)} AS d" if del_col else ""
     out: dict[str, str] = {}
-    for row in con.execute(f'SELECT {selected}, "{name_col}" AS n FROM "{table}"'):
+    query = f"SELECT {selected}, {_q(name_col)} AS n{del_select} FROM {_q(table)}"
+    for row in con.execute(query):
+        if del_col and _is_deleted(row["d"]):
+            continue
         for index in range(len(id_cols)):
             value = row[f"k{index}"]
             if value is not None and value != "":
@@ -249,7 +305,9 @@ class _ResolvedSchema:
     category_fk: str | None
     category_name: str | None
     asset_fk: str | None
+    asset_to_fk: str | None
     memo: str | None
+    txn_del: str | None
     category_table: str | None
     asset_table: str | None
     currency_table: str | None
@@ -260,6 +318,7 @@ class MoneyManagerBackup:
 
     Income rows are preserved and exposed. The backup's currencies are read from
     the ``CURRENCY`` table when present; ``currency()`` returns the main currency.
+    Soft-deleted rows (``IS_DEL``/``C_IS_DEL``) are excluded throughout.
     """
 
     def __init__(
@@ -269,7 +328,10 @@ class MoneyManagerBackup:
         self._type_map = _normal_type_map(type_map)
         self._schema = self._resolve_schema()
         self._categories = _name_map(con, self._schema.category_table)
-        self._account_names = _name_map(con, self._schema.asset_table)
+        self._account_names = _name_map(con, self._schema.asset_table, ASSET_NAME_COLS)
+        self._txn_cache: tuple[Transaction, ...] | None = None
+        self._accounts_cache: tuple[Account, ...] | None = None
+        self._currencies_cache: tuple[Currency, ...] | None = None
 
     @classmethod
     def from_file(
@@ -313,7 +375,9 @@ class MoneyManagerBackup:
             category_fk=_first_present(CATFK_COLS, cols),
             category_name=_first_present(CATNAME_COLS, cols),
             asset_fk=_first_present(ASSETFK_COLS, cols),
+            asset_to_fk=_first_present(ASSETTOFK_COLS, cols),
             memo=_first_present(MEMO_COLS, cols),
+            txn_del=_first_present(IS_DEL_COLS, cols),
             category_table=_pick_table(self._con, CATEGORY_TABLE_CANDIDATES, tables),
             asset_table=_pick_table(self._con, ASSET_TABLE_CANDIDATES, tables),
             currency_table=_pick_table(self._con, CURRENCY_TABLE_CANDIDATES, tables),
@@ -321,23 +385,32 @@ class MoneyManagerBackup:
 
     def _iter_rows(self) -> Iterator[sqlite3.Row]:
         s = self._schema
-        cols = [f'"{s.amount}" AS amt', f'"{s.date_col}" AS dt']
-        cols.append(f'"{s.type_col}" AS ty' if s.type_col else "NULL AS ty")
-        cols.append(f'"{s.category_fk}" AS cat' if s.category_fk else "NULL AS cat")
-        cols.append(f'"{s.category_name}" AS catname' if s.category_name else "NULL AS catname")
-        cols.append(f'"{s.asset_fk}" AS asset' if s.asset_fk else "NULL AS asset")
-        cols.append(f'"{s.memo}" AS memo' if s.memo else "NULL AS memo")
-        yield from self._con.execute(f'SELECT {", ".join(cols)} FROM "{s.txn_table}"')
+        cols = [f"{_q(s.amount)} AS amt", f"{_q(s.date_col)} AS dt"]
+        cols.append(f"{_q(s.type_col)} AS ty" if s.type_col else "NULL AS ty")
+        cols.append(f"{_q(s.category_fk)} AS cat" if s.category_fk else "NULL AS cat")
+        cols.append(f"{_q(s.category_name)} AS catname" if s.category_name else "NULL AS catname")
+        cols.append(f"{_q(s.asset_fk)} AS asset" if s.asset_fk else "NULL AS asset")
+        cols.append(f"{_q(s.asset_to_fk)} AS toasset" if s.asset_to_fk else "NULL AS toasset")
+        cols.append(f"{_q(s.memo)} AS memo" if s.memo else "NULL AS memo")
+        cols.append(f"{_q(s.txn_del)} AS isdel" if s.txn_del else "NULL AS isdel")
+        yield from self._con.execute(f"SELECT {', '.join(cols)} FROM {_q(s.txn_table)}")
 
     def transactions(self) -> list[Transaction]:
+        if self._txn_cache is not None:
+            return list(self._txn_cache)
         out: list[Transaction] = []
         for row in self._iter_rows():
+            if _is_deleted(row["isdel"]):
+                continue
             parsed = _parse_date(row["dt"])
             if parsed is None:
                 continue
             cat = row["catname"] or self._categories.get(str(row["cat"])) or "Uncategorized"
             account = (
                 self._account_names.get(str(row["asset"])) if row["asset"] is not None else None
+            )
+            to_account = (
+                self._account_names.get(str(row["toasset"])) if row["toasset"] is not None else None
             )
             out.append(
                 Transaction(
@@ -347,32 +420,72 @@ class MoneyManagerBackup:
                     category=str(cat),
                     memo=str(row["memo"] or ""),
                     account=account,
+                    to_account=to_account,
                 )
             )
-        return out
+        self._txn_cache = tuple(out)
+        return list(self._txn_cache)
 
     def categories(self) -> list[str]:
         names = set(self._categories.values())
         names.update(txn.category for txn in self.transactions())
         return sorted(names)
 
+    def _derived_balances(self) -> dict[str, float]:
+        """Best-effort account balances summed from transactions.
+
+        Income adds and expense subtracts on the owning account. Transfers move
+        the amount from the source account to the destination (``toAssetUid``)
+        and are only applied when a destination is present, so paired transfer
+        rows are not double-counted. Amounts are raw numeric sums with no
+        currency conversion, so totals across currencies are not meaningful.
+        """
+        balances: dict[str, float] = {}
+        for txn in self.transactions():
+            if txn.kind == "income" and txn.account is not None:
+                balances[txn.account] = balances.get(txn.account, 0.0) + txn.amount
+            elif txn.kind == "expense" and txn.account is not None:
+                balances[txn.account] = balances.get(txn.account, 0.0) - txn.amount
+            elif txn.kind == "transfer" and txn.to_account is not None:
+                if txn.account is not None:
+                    balances[txn.account] = balances.get(txn.account, 0.0) - txn.amount
+                balances[txn.to_account] = balances.get(txn.to_account, 0.0) + txn.amount
+        return balances
+
     def accounts(self) -> list[Account]:
-        asset_table = self._schema.asset_table
-        if not asset_table:
+        if self._accounts_cache is None:
+            self._accounts_cache = tuple(self._build_accounts())
+        return list(self._accounts_cache)
+
+    def _build_accounts(self) -> list[Account]:
+        table = self._schema.asset_table
+        if not table:
             return []
-        cols = _table_columns(self._con, asset_table)
-        name_col = _first_present(NAME_COLS, cols)
+        cols = _table_columns(self._con, table)
+        name_col = _first_present(ASSET_NAME_COLS, cols)
+        if not name_col:
+            return []
         balance_col = _first_present(BALANCE_COLS, cols)
-        if not name_col or not balance_col:
-            return []
-        return [
-            Account(name=str(row["n"]), balance=_to_float(row["b"]))
-            for row in self._con.execute(
-                f'SELECT "{name_col}" AS n, "{balance_col}" AS b FROM "{asset_table}"'
-            )
-        ]
+        del_col = _first_present(IS_DEL_COLS, cols)
+        derived = None if balance_col else self._derived_balances()
+        select = [f"{_q(name_col)} AS n"]
+        select.append(f"{_q(balance_col)} AS b" if balance_col else "NULL AS b")
+        select.append(f"{_q(del_col)} AS d" if del_col else "NULL AS d")
+        out: list[Account] = []
+        for row in self._con.execute(f"SELECT {', '.join(select)} FROM {_q(table)}"):
+            if del_col and _is_deleted(row["d"]):
+                continue
+            name = str(row["n"])
+            balance = _to_float(row["b"]) if balance_col else (derived or {}).get(name, 0.0)
+            out.append(Account(name=name, balance=balance))
+        return out
 
     def currencies(self) -> list[Currency]:
+        if self._currencies_cache is None:
+            self._currencies_cache = tuple(self._build_currencies())
+        return list(self._currencies_cache)
+
+    def _build_currencies(self) -> list[Currency]:
         table = self._schema.currency_table
         if not table:
             return []
@@ -383,21 +496,27 @@ class MoneyManagerBackup:
             return []
         name_col = _first_present(NAME_COLS, cols)
         main_col = _first_present(CURRENCY_MAIN_COLS, cols)
+        del_col = _first_present(IS_DEL_COLS, cols)
         select = [
-            f'"{iso_col}" AS iso' if iso_col else "'' AS iso",
-            f'"{symbol_col}" AS sym' if symbol_col else "'' AS sym",
-            f'"{name_col}" AS nm' if name_col else "'' AS nm",
-            f'"{main_col}" AS mn' if main_col else "0 AS mn",
+            f"{_q(iso_col)} AS iso" if iso_col else "'' AS iso",
+            f"{_q(symbol_col)} AS sym" if symbol_col else "'' AS sym",
+            f"{_q(name_col)} AS nm" if name_col else "'' AS nm",
+            f"{_q(main_col)} AS mn" if main_col else "0 AS mn",
+            f"{_q(del_col)} AS d" if del_col else "NULL AS d",
         ]
-        return [
-            Currency(
-                iso=str(row["iso"] or ""),
-                symbol=str(row["sym"] or ""),
-                name=str(row["nm"] or ""),
-                is_main=bool(_to_float(row["mn"])),
+        out: list[Currency] = []
+        for row in self._con.execute(f"SELECT {', '.join(select)} FROM {_q(table)}"):
+            if del_col and _is_deleted(row["d"]):
+                continue
+            out.append(
+                Currency(
+                    iso=str(row["iso"] or ""),
+                    symbol=str(row["sym"] or ""),
+                    name=str(row["nm"] or ""),
+                    is_main=bool(_to_float(row["mn"])),
+                )
             )
-            for row in self._con.execute(f'SELECT {", ".join(select)} FROM "{table}"')
-        ]
+        return out
 
     def currency(self) -> Currency | None:
         items = self.currencies()
@@ -420,12 +539,14 @@ class MoneyManagerBackup:
             "category_fk": s.category_fk,
             "category_name": s.category_name,
             "asset_fk": s.asset_fk,
+            "asset_to_fk": s.asset_to_fk,
             "memo": s.memo,
+            "is_del": s.txn_del,
         }
         if s.type_col:
             rows = self._con.execute(
-                f'SELECT "{s.type_col}" AS ty, COUNT(*) n, SUM(ABS("{s.amount}")) total '
-                f'FROM "{s.txn_table}" GROUP BY "{s.type_col}"'
+                f"SELECT {_q(s.type_col)} AS ty, COUNT(*) n, SUM(ABS({_q(s.amount)})) total "
+                f"FROM {_q(s.txn_table)} GROUP BY {_q(s.type_col)}"
             )
             out["do_type_breakdown"] = [
                 {

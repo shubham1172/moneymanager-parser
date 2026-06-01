@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `Transaction.to_account` exposing the transfer destination account (`toAssetUid`).
+- Account name resolution for the `NIC_NAME` nickname used by recent exports.
+- Best-effort derived account balances when the asset table has no balance column.
+
+### Changed
+- Soft-deleted rows (`IS_DEL` / `C_IS_DEL`) are now excluded from transactions, accounts,
+  categories, and currencies.
+- `transactions()`, `accounts()`, and `currencies()` results are memoized per backup.
+
+### Security
+- Connections are opened read-only via `PRAGMA query_only=ON`.
+- Archive members are size-checked before extraction to guard against decompression bombs.
+- SQL identifiers read from the backup are quoted defensively.
+
 ## [0.1.0] - 2026-06-01
 
 ### Added
