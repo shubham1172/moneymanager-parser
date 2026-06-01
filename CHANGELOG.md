@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-01
+
 ### Added
 - `Transaction.to_account` exposing the transfer destination account (`toAssetUid`).
 - Account name resolution for the `NIC_NAME` nickname used by recent exports.
