@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-06
+
+### Changed
+- Query `top` and `transactions` rows now include `account` and `to_account`
+  for each serialized transaction.
+
 ## [0.2.0] - 2026-06-01
 
 ### Added

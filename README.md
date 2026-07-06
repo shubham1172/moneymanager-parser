@@ -46,7 +46,7 @@ with MoneyManagerBackup.from_file("backup.mmbak") as backup:
         print(main.iso, main.symbol)
     for txn in backup.transactions():
         print(txn.date, txn.kind, txn.category, txn.amount)
-    print(backup.query(month="2026-01", group_by="category").as_dict())
+    print(backup.query(month="2026-01", top=10).as_dict())  # rows include account/to_account
 ```
 
 Custom transaction type maps are supported:

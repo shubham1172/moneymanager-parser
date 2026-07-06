@@ -79,8 +79,15 @@ def test_query_filters_groups_and_lists(sample_mmbak: Path) -> None:
             "Food",
             "Transit",
         }
-        assert len(backup.query(top=2).top) == 2
-        assert len(backup.query(list_n=3).transactions) == 3
+        top_rows = backup.query(top=2, kind="all").top
+        assert len(top_rows) == 2
+        assert top_rows[0]["account"] == "Bank"
+        assert top_rows[0]["to_account"] is None
+        list_rows = backup.query(list_n=3, kind="all").transactions
+        assert len(list_rows) == 3
+        assert {"account", "to_account"} <= list_rows[0].keys()
+        assert {row["account"] for row in list_rows} == {"Cash", "Bank"}
+        assert {row["to_account"] for row in list_rows} == {None}
         assert (
             backup.query(
                 date_from=today.isoformat(), date_to=today.isoformat(), kind="all"

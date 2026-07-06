@@ -653,6 +653,8 @@ class MoneyManagerBackup:
                     "category": txn.category,
                     "memo": txn.memo[:60],
                     "date": txn.date.isoformat(),
+                    "account": txn.account,
+                    "to_account": txn.to_account,
                 }
                 for txn in tops
             )
@@ -664,6 +666,8 @@ class MoneyManagerBackup:
                     "amount": round(txn.amount),
                     "category": txn.category,
                     "memo": txn.memo[:60],
+                    "account": txn.account,
+                    "to_account": txn.to_account,
                 }
                 for txn in recent
             )

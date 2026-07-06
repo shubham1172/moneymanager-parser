@@ -3,7 +3,7 @@
 from .core import MoneyManagerBackup
 from .models import Account, Currency, QueryResult, Transaction
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Account",
