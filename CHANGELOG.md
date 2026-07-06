@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-06
+
+### Added
+- `MoneyManagerBackup.query(..., account=...)` filters rows by case-insensitive
+  exact account name and records the account in result filters.
+- `group_by="account"` returns totals per source account, with missing accounts
+  grouped as `Unspecified`.
+
 ## [0.3.0] - 2026-07-06
 
 ### Changed

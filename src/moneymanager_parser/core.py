@@ -565,6 +565,7 @@ class MoneyManagerBackup:
         date_to: str | date | None = None,
         month: str | None = None,
         category: str | None = None,
+        account: str | None = None,
         search: str | None = None,
         kind: QueryKind = "expense",
         group_by: GroupBy | None = None,
@@ -580,6 +581,7 @@ class MoneyManagerBackup:
         start = _period_bound(date_from, is_end=False) if isinstance(date_from, str) else date_from
         end = _period_bound(date_to, is_end=True) if isinstance(date_to, str) else date_to
         cat_want = category.strip().lower() if category else None
+        account_want = account.strip().lower() if account else None
         search_want = search.strip().lower() if search else None
         matches: list[Transaction] = []
         for txn in self.transactions():
@@ -592,6 +594,8 @@ class MoneyManagerBackup:
             if end and txn.date > end:
                 continue
             if cat_want and txn.category.lower() != cat_want:
+                continue
+            if account_want and (txn.account is None or txn.account.lower() != account_want):
                 continue
             if (
                 search_want
@@ -606,6 +610,7 @@ class MoneyManagerBackup:
             "from": start.isoformat() if start else None,
             "to": end.isoformat() if end else None,
             "category": category,
+            "account": account,
             "search": search,
             "kind": kind,
         }
@@ -626,15 +631,18 @@ class MoneyManagerBackup:
                     key = txn.date.isoformat()
                 elif group_by == "week":
                     key = _iso_week_start(txn.date).isoformat()
+                elif group_by == "account":
+                    key = txn.account or "Unspecified"
                 else:
                     key = txn.category
                 bucket = groups.setdefault(key, [0.0, 0.0])
                 bucket[0] += txn.amount
                 bucket[1] += 1
             items = list(groups.items())
-            items.sort(
-                key=(lambda item: item[1][0]), reverse=True
-            ) if group_by == "category" else items.sort(key=lambda item: item[0])
+            items.sort(key=(lambda item: item[1][0]), reverse=True) if group_by in {
+                "category",
+                "account",
+            } else items.sort(key=lambda item: item[0])
             result = QueryResult(
                 status="ok",
                 filters=filters,

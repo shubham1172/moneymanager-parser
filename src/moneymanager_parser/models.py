@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any, Literal
 
 Kind = Literal["income", "expense", "transfer"]
-GroupBy = Literal["month", "category", "day", "week"]
+GroupBy = Literal["month", "category", "day", "week", "account"]
 QueryKind = Literal["expense", "income", "all"]
 
 JsonValue = Any

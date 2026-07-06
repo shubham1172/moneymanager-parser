@@ -46,6 +46,8 @@ with MoneyManagerBackup.from_file("backup.mmbak") as backup:
         print(main.iso, main.symbol)
     for txn in backup.transactions():
         print(txn.date, txn.kind, txn.category, txn.amount)
+    # Filter or group by account for account-specific totals.
+    print(backup.query(month="2026-01", account="Credit Card", group_by="account").as_dict())
     print(backup.query(month="2026-01", top=10).as_dict())  # rows include account/to_account
 ```
 
@@ -58,7 +60,7 @@ MoneyManagerBackup.from_file("backup.mmbak", type_map={0: "income", 1: "expense"
 ## CLI
 
 ```bash
-mmbak query backup.mmbak --month 2026-01 --group-by category --top 10
+mmbak query backup.mmbak --month 2026-01 --account "Credit Card" --group-by account --top 10
 mmbak schema backup.mmbak
 mmbak currency backup.mmbak
 ```

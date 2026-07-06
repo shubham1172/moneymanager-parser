@@ -38,9 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--to", dest="date_to")
     query.add_argument("--month")
     query.add_argument("--category")
+    query.add_argument("--account")
     query.add_argument("--search")
     query.add_argument("--kind", choices=["expense", "income", "all"], default="expense")
-    query.add_argument("--group-by", choices=["month", "category", "day", "week"])
+    query.add_argument("--group-by", choices=["month", "category", "day", "week", "account"])
     query.add_argument("--top", type=int)
     query.add_argument("--list", dest="list_n", type=int)
     query.add_argument("--limit", type=int, default=24)
@@ -68,6 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         date_to=args.date_to,
                         month=args.month,
                         category=args.category,
+                        account=args.account,
                         search=args.search,
                         kind=args.kind,
                         group_by=args.group_by,

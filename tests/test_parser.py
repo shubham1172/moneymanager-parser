@@ -73,12 +73,23 @@ def test_query_filters_groups_and_lists(sample_mmbak: Path) -> None:
         assert backup.query(month=today.strftime("%Y-%m"), kind="expense").summary["total"] == 200
         assert backup.query(category="food", kind="all").summary["count"] >= 2
         assert backup.query(search="coffee", kind="expense").summary["total"] == 120
+        cash_query = backup.query(account="cash", kind="all", top=10, list_n=10)
+        assert cash_query.filters["account"] == "cash"
+        assert cash_query.summary["count"] == 4
+        assert cash_query.summary["total"] == 546
+        assert {row["account"] for row in cash_query.top} == {"Cash"}
+        assert {row["account"] for row in cash_query.transactions} == {"Cash"}
+        assert backup.query(account="missing", kind="all").summary["count"] == 0
         assert backup.query(kind="income").summary["count"] == 2
         assert backup.query(group_by="month", kind="all").groups
         assert backup.query(group_by="category", kind="expense").groups[0]["key"] in {
             "Food",
             "Transit",
         }
+        assert backup.query(group_by="account", kind="all").groups == [
+            {"key": "Bank", "total": 4500, "count": 2},
+            {"key": "Cash", "total": 546, "count": 4},
+        ]
         top_rows = backup.query(top=2, kind="all").top
         assert len(top_rows) == 2
         assert top_rows[0]["account"] == "Bank"
@@ -159,6 +170,10 @@ def test_cli_smoke(sample_mmbak: Path, capsys: pytest.CaptureFixture[str]) -> No
     payload = json.loads(capsys.readouterr().out)
     assert payload["main"]["iso"] == "USD"
     assert len(payload["all"]) == 2
+    assert main(["query", str(sample_mmbak), "--account", "cash", "--group-by", "account"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["filters"]["account"] == "cash"
+    assert payload["groups"] == [{"key": "Cash", "total": 546, "count": 4}]
     assert main(["query", str(sample_mmbak), "--top", "1"]) == 0
     assert json.loads(capsys.readouterr().out)["top"]
     assert main(["schema", str(sample_mmbak.with_name("missing.mmbak"))]) == 1
@@ -237,6 +252,10 @@ def test_more_date_and_query_branches(tmp_path: Path) -> None:
     with MoneyManagerBackup.from_file(db) as backup:
         assert backup.query(month="2999-01").as_dict()["summary"]["total"] == 10
         assert backup.query(search="none").as_dict()["summary"]["total"] == 0
+        assert backup.query(group_by="account").as_dict()["groups"] == [
+            {"key": "Unspecified", "total": 10, "count": 1}
+        ]
+        assert backup.query(account="Cash").as_dict()["summary"]["count"] == 0
 
 
 def test_realistic_schema_names_balances_and_deletes(realistic_mmbak: Path) -> None:
